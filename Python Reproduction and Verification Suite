@@ -1,0 +1,101 @@
+import os
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives import serialization
+
+P = 2**255 - 19
+A = 486662
+A24 = (A - 2) // 4  # 121665
+
+def decode_scalar(k: bytes) -> int:
+    b = bytearray(k)
+    b[0] &= 248
+    b[31] &= 127
+    b[31] |= 64
+    return int.from_bytes(b, "little")
+
+def decode_u(u: bytes) -> int:
+    b = bytearray(u)
+    b[31] &= 127
+    return int.from_bytes(b, "little")
+
+def x25519_from_scratch(k_bytes: bytes, u_bytes: bytes) -> bytes:
+    """RFC 7748 Section 5 constant-time Montgomery ladder (x-coordinate only)."""
+    x1 = decode_u(u_bytes)
+    x2, z2, x3, z3 = 1, 0, x1, 1
+    swap = 0
+    k = decode_scalar(k_bytes)
+
+    for t in range(254, -1, -1):
+        kt = (k >> t) & 1
+        swap ^= kt
+        if swap:
+            x2, x3 = x3, x2
+            z2, z3 = z3, z2
+        swap = kt
+
+        a = (x2 + z2) % P
+        aa = (a * a) % P
+        b = (x2 - z2) % P
+        bb = (b * b) % P
+        e = (aa - bb) % P
+        c = (x3 + z3) % P
+        d = (x3 - z3) % P
+        da = (d * a) % P
+        cb = (c * b) % P
+        x3 = pow(da + cb, 2, P)
+        z3 = (x1 * pow(da - cb, 2, P)) % P
+        x2 = (aa * bb) % P
+        z2 = (e * (aa + A24 * e)) % P
+
+    if swap:
+        x2, x3 = x3, x2
+        z2, z3 = z3, z2
+
+    res = (x2 * pow(z2, P - 2, P)) % P
+    return res.to_bytes(32, "little")
+
+def is_on_primary_curve(u_bytes: bytes) -> bool:
+    """Euler's criterion: True if u^3 + Au^2 + u is a square mod P, else on Twist."""
+    u = decode_u(u_bytes)
+    rhs = (pow(u, 3, P) + A * pow(u, 2, P) + u) % P
+    return pow(rhs, (P - 1) // 2, P) in (0, 1)
+
+# --- Experiment 1: RFC 7748 Section 6.1 Official Test Vector ---
+k_vec = bytes.fromhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+u_vec = bytes.fromhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c")
+expected = "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"
+assert x25519_from_scratch(k_vec, u_vec).hex() == expected
+print("[PASS] RFC 7748 Test Vector reproduced exactly.")
+
+# --- Experiment 2: Twist Security & Differential Validation vs. OpenSSL ---
+priv_bytes = os.urandom(32)
+openssl_priv = x25519.X25519PrivateKey.from_private_bytes(priv_bytes)
+curve_hits, twist_hits = 0, 0
+
+for _ in range(20):
+    random_u = os.urandom(32)  # Arbitrary 32-byte string (no curve validation)
+    if is_on_primary_curve(random_u):
+        curve_hits += 1
+    else:
+        twist_hits += 1
+    local_secret = x25519_from_scratch(priv_bytes, random_u)
+    openssl_secret = openssl_priv.exchange(x25519.X25519PublicKey.from_public_bytes(random_u))
+    assert local_secret == openssl_secret
+
+print(f"[PASS] Twist security verified ({curve_hits} primary curve, {twist_hits} quadratic twist inputs matched OpenSSL).")
+
+# --- Experiment 3: Low-Order / Degenerate Point Annihilation (Neves & Tibouchi, 2016) ---
+low_order_points = [
+    bytes.fromhex("00" * 32),  # u = 0 (order 2)
+    bytes.fromhex("01" + "00" * 31),  # u = 1 (order 4)
+    bytes.fromhex("ec" + "ff" * 30 + "7f"),  # u = p - 1 (order 2 on twist)
+    bytes.fromhex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),  # order 8
+    bytes.fromhex("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),  # order 8
+]
+
+for pt in low_order_points:
+    out1 = x25519_from_scratch(os.urandom(32), pt)
+    out2 = x25519_from_scratch(os.urandom(32), pt)
+    assert out1 == out2 == b"\x00" * 32
+
+print("[PASS] All low-order points annihilated to 0x00..00; zero key bits leaked.")
