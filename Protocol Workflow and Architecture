@@ -1,0 +1,25 @@
+[ Step 1: Scalar Generation ]
+Adversary-free generation of 32 cryptographically secure pseudorandom bytes:
+s = CSPRNG(32 bytes)
+           │
+           ▼
+[ Step 2: Cofactor Clamping ]
+Enforce subgroup and timing invariants via bitwise masking:
+s[0] &= 248; s[31] &= 127; s[31] |= 64
+           │
+           ▼
+[ Step 3: Scalar Multiplication ]
+Compute public point coordinate using Montgomery Ladder on base point u = 9:
+U_pub = MontgomeryLadder(s, 9)
+           │
+           ▼
+[ Step 4: Public Key Exchange ]
+Transmit 32-byte raw coordinate over untrusted transport:
+Alice  ──── [ U_Alice (32B) ] ────►  Bob
+Alice  ◄─── [ U_Bob   (32B) ] ─────  Bob
+           │
+           ▼
+[ Step 5: Shared Secret Derivation ]
+Evaluate Montgomery Ladder against peer's 32-byte public key:
+K_shared = MontgomeryLadder(s_local, U_peer)
+(Implicitly secure: handles primary curve and twist transparently)
